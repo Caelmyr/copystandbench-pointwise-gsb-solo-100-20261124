@@ -2,13 +2,14 @@
 
 from io import BytesIO
 from pathlib import Path
+import re
 
 from flask import Blueprint, jsonify, render_template, request, send_file
 
 from image_lab import create_app as create_preparation
 from image_lab.validation import Invalid, object_value
 
-from . import analysis, photos
+from . import analysis, photos, start_step
 from .workspace import Workspace, region_at
 
 
@@ -90,10 +91,20 @@ def create_app(root):
         value = body()
         return jsonify(library.set_scale(project, value.get("revision"), value.get("ruler")))
 
+    @desk.post("/projects/<project>/start-step")
+    def start_step_report(project):
+        value = body()
+        record = library.record(project)
+        regions = start_step.checked_regions(record, value.get("boxes"))
+        return jsonify(start_step.evaluate(
+            record["captures"], regions,
+            lambda capture: library.capture_path(project, capture, record=record)))
+
     @desk.patch("/projects/<project>/adopt")
     def adopt(project):
         value = body()
-        return jsonify(library.adopt(project, value.get("revision"), value.get("capture")))
+        record, evaluation = library.adopt(project, value.get("revision"), value)
+        return jsonify({"record": record, "evaluation": evaluation})
 
     @desk.get("/projects/<project>/captures/<capture>/source.png")
     def source(project, capture):
@@ -147,7 +158,7 @@ def create_app(root):
         if request.method == "GET":
             return jsonify(library.proof_list(project))
         value = body()
-        return jsonify(library.seal(project, value.get("revision"), value.get("box"))), 201
+        return jsonify(library.seal(project, value.get("revision"))), 201
 
     @desk.get("/projects/<project>/proofs/<proof>")
     def proof_record(project, proof):
@@ -156,10 +167,13 @@ def create_app(root):
     @desk.get("/projects/<project>/proofs/<proof>/<file>")
     def proof_file(project, proof, file):
         folder, _ = library.proof(project, proof)
-        if file not in ("review.json", "review.zip", "source.png", "detail.png"):
-            raise Invalid("这不是复核单的附件。")
-        return send_file(folder / file, download_name=file,
-                         as_attachment=file == "review.zip" or "download" in request.args)
+        if file in ("review.json", "review.zip", "source.png") or \
+                re.fullmatch(r"detail-[a-f0-9]{16}\.png", file):
+            path = folder / file
+            if path.is_relative_to(folder) and path.exists():
+                return send_file(path, download_name=file,
+                                 as_attachment=file == "review.zip" or "download" in request.args)
+        raise Invalid("这不是复核单的附件。")
 
     app.register_blueprint(desk)
     return app

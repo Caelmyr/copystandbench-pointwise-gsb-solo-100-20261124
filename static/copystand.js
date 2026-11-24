@@ -2,7 +2,7 @@
 
 const $ = id => document.getElementById(id);
 const state = {project: null, shot: null, region: null, tool: null, drag: null, points: [], clipping: false,
-  refresh: 0, reading: 0, saving: false};
+  refresh: 0, reading: 0, saving: false, startBoxes: new Set(), startReport: null, startBusy: false};
 const escapeHtml = value => String(value).replace(/[&<>"']/g, ch => (
   {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
 const stepLabel = step => step > 0 ? '+' + step : String(step);
@@ -61,6 +61,11 @@ function accept(record, shotId = state.shot, regionId = state.region) {
   state.tool = null;
   state.drag = null;
   state.points = [];
+  if (record) {
+    const live = new Set(record.boxes.map(box => box.id));
+    state.startBoxes = new Set([...state.startBoxes].filter(id => live.has(id)));
+    if (state.startReport && state.startReport._project !== record.id) state.startReport = null;
+  }
   render();
 }
 
@@ -70,6 +75,8 @@ async function openProject(id, preferredStep = null) {
   if (order !== state.refresh) return;
   const shot = preferredStep === null ? null : record?.captures.find(item => item.step === preferredStep)?.id;
   state.clipping = false;
+  state.startBoxes = new Set();
+  state.startReport = null;
   accept(record, shot, null);
   rememberProject();
   $('projects').value = record?.id || '';
@@ -86,10 +93,11 @@ async function mutate(path, method, data, message) {
     else data = {revision: state.project.revision, ...data};
     const response = await request(projectPath() + path, method, data);
     if (state.project?.id === project) {
+      const record = response.record || response;
       const capturedStep = Number($('shotStep').value);
-      const shot = path === '/captures' ? response.captures.find(item => item.step === capturedStep)?.id : state.shot;
-      const newBox = path === '/boxes' ? response.boxes.at(-1)?.id : state.region;
-      accept(response, shot, newBox);
+      const shot = path === '/captures' ? record.captures.find(item => item.step === capturedStep)?.id : state.shot;
+      const newBox = path === '/boxes' ? record.boxes.at(-1)?.id : state.region;
+      accept(record, shot, newBox);
       notice(message);
     }
     return response;
@@ -134,10 +142,8 @@ function render() {
     '尚未导入照片';
   $('selectedBounds').textContent = box ? box.bounds.join(', ') : '';
   $('scaleText').textContent = project.scale ? fixed(project.scale.pixels_per_mm, 3) + ' px/mm' : '未标定';
-  $('viewerHint').textContent = adopted ? '已采用档位 ' + stepLabel(adopted.step) + ' · ' + adopted.name :
-    '检查清楚后采用一档原照。';
-  $('adopt').disabled = !shot || currentAdopted;
-  $('adopt').textContent = shot && currentAdopted ? '当前原照已采用' : '采用当前原照';
+  $('viewerHint').textContent = adopted ? '已采用起始档 ' + stepLabel(adopted.step) + ' · ' + adopted.name :
+    '在下方“起始档校准”勾选检查框并计算可重复拨回的起始档。';
   $('clipToggle').disabled = !shot;
   $('clipToggle').setAttribute('aria-pressed', String(state.clipping));
   $('clipToggle').textContent = state.clipping ? '回到原照' : '欠曝／过曝';
@@ -151,7 +157,7 @@ function render() {
   $('resetScale').disabled = !project.scale;
   $('detailDownload').hidden = !shot || !box;
   $('compare').disabled = !shot || !adopted || !box || currentAdopted;
-  $('seal').disabled = !adopted || !box;
+  renderStartPanel();
   if (shot) {
     const source = shotPath(shot.id) + (state.clipping ? '/clipping.png' : '/source.png');
     if ($('frameImage').getAttribute('src') !== source) $('frameImage').src = source;
@@ -277,6 +283,99 @@ async function refreshReadings() {
   catch (error) { if (state.reading === read) notice(error.message, true); }
 }
 
+function renderStartPanel() {
+  const project = state.project;
+  const panel = $('startBoxes');
+  if (!project) return;
+  panel.innerHTML = project.boxes.map(box =>
+    '<label class="start-check"><input type="checkbox" data-start-box="' + box.id + '"' +
+    (state.startBoxes.has(box.id) ? ' checked' : '') + '><span>' + escapeHtml(box.name) +
+    ' <small>' + box.bounds.join(', ') + '</small></span></label>').join('');
+  const checked = state.startBoxes.size;
+  $('evaluateStart').disabled = state.startBusy || checked < 2;
+  const report = state.startReport;
+  const adopted = project.focus_start;
+  const snapshot = new Map((adopted?.evaluation?.box_results || []).map(item => [item.box, item.bounds]));
+  const sameBoxes = adopted && adopted.box_ids.length === state.startBoxes.size &&
+    adopted.box_ids.every(id => state.startBoxes.has(id)) &&
+    [...state.startBoxes].every(id => adopted.box_ids.includes(id));
+  const unchanged = Boolean(sameBoxes) && adopted.box_ids.every(id => {
+    const live = boxAt(id);
+    const saved = snapshot.get(id);
+    return live && saved && live.bounds.length === saved.length &&
+      live.bounds.every((value, index) => value === saved[index]);
+  });
+  const stale = !unchanged;
+  $('adoptStart').disabled = state.startBusy || !report?.ok;
+  $('sealStart').disabled = !adopted || stale;
+  if (!adopted) {
+    $('startHint').textContent = checked < 2 ? '至少勾选两个已有检查框。' :
+      '计算后按每个勾选框自身的最高有效清晰度判断过线。';
+  } else if (stale) {
+    $('startHint').textContent = '当前勾选与已采用起始档（' + adopted.box_ids.length +
+      ' 个检查框）不一致，封存前请重新计算并采用。';
+  } else {
+    $('startHint').textContent = '已采用起始档 ' + stepLabel(adopted.step) + '，可封存复核单。';
+  }
+  renderStartResult();
+}
+
+function renderStartResult() {
+  const wrap = $('startResult');
+  const report = state.startReport;
+  if (!report) {
+    wrap.hidden = true;
+    wrap.replaceChildren();
+    return;
+  }
+  wrap.hidden = false;
+  const warningItems = (report.warnings || []).map(item => '<li>' + escapeHtml(item.message) + '</li>').join('');
+  const warningBlock = warningItems ? '<div class="start-warn"><b>无效读数（未参与过线判断）</b><ul>' +
+    warningItems + '</ul></div>' : '';
+  if (!report.ok) {
+    const items = report.failures.map(item => '<li>' + escapeHtml(item.message) + '</li>').join('');
+    wrap.innerHTML = '<div class="start-fail"><b>没有能用的起始档，不能据此采用。</b><ul>' + items + '</ul></div>' +
+      warningBlock + renderStartTable(report);
+    return;
+  }
+  const chosen = report.recommendation;
+  const others = report.candidates.filter(item => item.step !== chosen.step);
+  const weakName = report.box_results.find(item => item.box === chosen.weakest_box)?.name || '';
+  const head = '<div class="start-ok"><div><b>推荐起始档 ' + stepLabel(chosen.step) + '</b>' +
+    '<span>起始档与前后各一档（' + [chosen.step - 1, chosen.step, chosen.step + 1].map(stepLabel).join('、') +
+    '）均有实拍且每个勾选框全部过线</span></div>' +
+    '<div class="start-metrics"><span>连续合格档 <b>' + chosen.run_length + '</b> 档（' +
+    chosen.run_steps.map(stepLabel).join('、') + '）</span><span>最弱框离过线余量 <b>+' +
+    fixed(chosen.weakest_margin_pct, 1) + '%</b> · ' + escapeHtml(weakName) + '</span></div></div>';
+  const alt = others.length ? '<p class="start-alts">其余可用起始档：' + others.map(item =>
+    '档位 ' + stepLabel(item.step) + '（连续 ' + item.run_length + ' 档，最弱余量 +' +
+    fixed(item.weakest_margin_pct, 1) + '%）').join('；') +
+    '。已优先选择连续合格档更长、最弱框余量更大的一档。</p>' : '';
+  wrap.innerHTML = head + alt + warningBlock + renderStartTable(report);
+}
+
+function renderStartTable(report) {
+  const steps = report.steps;
+  const head = '<tr><th>检查框</th><th>参照档（最高有效清晰度）</th><th>过线 85%</th>' +
+    steps.map(step => '<th>' + stepLabel(step) + '</th>').join('') + '</tr>';
+  const rows = report.box_results.map(item => {
+    const cells = item.samples.map(sample => {
+      const valid = sample.tone_valid;
+      const state = valid ? (sample.passes ? 'pass' : 'fail') : 'invalid';
+      const title = valid ? '清晰度 ' + sample.score + ' · 灰阶跨度 ' + sample.tone_span :
+        '灰阶跨度 ' + sample.tone_span + ' 低于 8，读数无效';
+      return '<td class="cell-' + state + '" title="' + title + '">' +
+        (valid ? (sample.passes ? '过' : '未过') : '无效') +
+        '<small>' + fixed(sample.score, 0) + '</small></td>';
+    }).join('');
+    return '<tr><td>' + escapeHtml(item.name) + '</td><td>' +
+      (item.reference ? '档位 ' + stepLabel(item.reference.step) + ' · ' + fixed(item.reference.score) : '无有效读数') +
+      '</td><td>' + (item.threshold === null ? '—' : fixed(item.threshold)) + '</td>' + cells + '</tr>';
+  }).join('');
+  return '<div class="start-table-wrap"><table class="start-table"><thead>' + head + '</thead><tbody>' +
+    rows + '</tbody></table></div>';
+}
+
 async function refreshProofs() {
   $('proofs').textContent = '暂无复核单。';
   if (!state.project) return;
@@ -284,8 +383,9 @@ async function refreshProofs() {
   const proofs = await request(projectPath() + '/proofs');
   if (state.project?.id !== project || proofs.length === 0) return;
   $('proofs').innerHTML = proofs.map(item =>
-    '<button type="button" data-proof="' + item.id + '">打开档位 ' + stepLabel(item.capture.step) +
-    ' · ' + escapeHtml(item.region.name) + '</button>').join('');
+    '<button type="button" data-proof="' + item.id + '">打开起始档 ' + stepLabel(item.capture.step) +
+    ' · ' + (item.kind === 'focus_start' ? item.boxes.length + ' 个检查框' : escapeHtml(item.region.name)) +
+    '</button>').join('');
 }
 
 function openDialog(title, content) {
@@ -298,18 +398,56 @@ function detailFigure(title, source) {
   return '<figure><img alt="" src="' + source + '"><figcaption>' + escapeHtml(title) + '</figcaption></figure>';
 }
 
+function proofReadingMarkup(item, ratio) {
+  const reading = item.reading;
+  const physical = reading.physical;
+  const lighting = reading.lighting;
+  const dims = physical ? fixed(physical.width_mm, 1) + ' × ' + fixed(physical.height_mm, 1) + ' mm' : '未标定';
+  const grid = lighting.median_grid.flat().map(value => '<span>' + fixed(value, 1) + '</span>').join('');
+  const sample = item.adopted_sample;
+  const ref = item.reference;
+  return '<div class="stat-row">' + stat('采用档清晰度', fixed(sample.score)) +
+    stat('灰阶跨度', fixed(sample.tone_span, 1)) +
+    stat('过线阈值（参照 × ' + (ratio * 100).toFixed(0) + '%）', fixed(item.threshold)) +
+    stat('参照档 / 最高有效清晰度', stepLabel(ref.step) + ' · ' + fixed(ref.score)) +
+    stat('复制现场尺寸', dims) +
+    stat('近纯白', fixed(lighting.clippedWhitePct, 1) + ' %') + '</div>' +
+    '<div class="grid-readout"><div>' + grid + '</div><span>局部亮度中位数 · 九格读数</span></div>';
+}
+
 async function openProof(id) {
   const base = projectPath() + '/proofs/' + id;
   const proof = await request(base);
-  const selected = '档位 ' + stepLabel(proof.capture.step) + ' · ' + proof.capture.name;
-  const bounds = proof.region.bounds;
-  const detail = proof.region.name + ' · 原照坐标 ' + bounds.join(', ');
-  const figures = detailFigure(selected, base + '/source.png') + detailFigure(detail, base + '/detail.png');
-  openDialog('已封存 · ' + proof.title, '<div class="photo-pair">' + figures + '</div>' +
-    '<div class="archived-detail">' + readingMarkup(proof.reading) + '</div>' +
-    '<div class="row wrap"><a class="button" href="' + base + '/review.zip" download>下载复核 ZIP</a>' +
-    '<a class="button" href="' + base + '/source.png?download=1" download>原照 PNG</a>' +
-    '<a class="button" href="' + base + '/detail.png?download=1" download>裁片 PNG</a></div>');
+  const selected = '起始档 ' + stepLabel(proof.capture.step) + ' · ' + proof.capture.name;
+  if (proof.kind !== 'focus_start' || !proof.boxes) {
+    const bounds = proof.region.bounds;
+    const figures = detailFigure(selected, base + '/source.png') +
+      detailFigure(proof.region.name + ' · 原照坐标 ' + bounds.join(', '), base + '/detail.png');
+    openDialog('已封存 · ' + proof.title, '<div class="photo-pair">' + figures + '</div>' +
+      '<div class="archived-detail">' + readingMarkup(proof.reading) + '</div>' +
+      proofDownloads(base));
+    return;
+  }
+  const tabs = proof.boxes.map((item, index) =>
+    '<button type="button" class="proof-tab' + (index === 0 ? ' current' : '') +
+    '" data-proof-box="' + index + '">' + escapeHtml(item.name) + '</button>').join('');
+  const panels = proof.boxes.map((item, index) => {
+    const figures = detailFigure(selected, base + '/source.png') +
+      detailFigure(item.name + ' · 原照坐标 ' + item.bounds.join(', '), base + '/' + item.detail);
+    return '<div class="proof-pane" data-proof-pane="' + index + '"' + (index ? ' hidden' : '') + '>' +
+      '<div class="photo-pair">' + figures + '</div>' +
+      '<div class="archived-detail">' + proofReadingMarkup(item, proof.pass_ratio) + '</div></div>';
+  }).join('');
+  const reason = '<p class="proof-reason">推荐理由：起始档与前后各一档均有实拍且全部勾选框过线；连续合格档 ' +
+    proof.recommendation.run_length + ' 档（' + proof.recommendation.run_steps.map(stepLabel).join('、') +
+    '），最弱框离过线余量 +' + fixed(proof.recommendation.weakest_margin_pct, 1) + '%。</p>';
+  openDialog('已封存 · ' + proof.title,
+    '<div class="proof-tabs" role="tablist">' + tabs + '</div>' + panels + reason + proofDownloads(base));
+}
+
+function proofDownloads(base) {
+  return '<div class="row wrap"><a class="button" href="' + base + '/review.zip" download>下载复核 ZIP</a>' +
+    '<a class="button" href="' + base + '/source.png?download=1" download>原照 PNG</a></div>';
 }
 
 function ordered(first, second) {
@@ -400,13 +538,61 @@ $('setScale').onclick = () => startTool('scale', '依次点击原照上两个标
 $('removeBox').onclick = safe(() => mutate('/boxes/' + state.region, 'DELETE', {}, '已移除检查框。'));
 $('resetScale').onclick = safe(() => mutate('/scale', 'PATCH', {ruler: null}, '已清除比例标定。'));
 $('clipToggle').onclick = () => { state.clipping = !state.clipping; render(); };
-$('adopt').onclick = safe(() => mutate('/adopt', 'PATCH', {capture: state.shot}, '已采用该档原照。'));
-$('seal').onclick = safe(async () => {
-  const proof = await request(projectPath() + '/proofs', 'POST', {revision: state.project.revision, box: state.region});
+$('startBoxes').onchange = event => {
+  const hit = event.target.closest('[data-start-box]');
+  if (!hit) return;
+  if (hit.checked) state.startBoxes.add(hit.dataset.startBox);
+  else state.startBoxes.delete(hit.dataset.startBox);
+  state.startReport = null;
+  renderStartPanel();
+};
+$('evaluateStart').onclick = safe(async () => {
+  if (state.startBoxes.size < 2) throw Error('请至少勾选两个已有检查框。');
+  state.startBusy = true;
+  renderStartPanel();
+  try {
+    const report = await request(projectPath() + '/start-step', 'POST',
+      {boxes: [...state.startBoxes]});
+    report._project = state.project.id;
+    state.startReport = report;
+    if (report.ok) {
+      const chosen = report.recommendation;
+      notice('起始档计算完成：推荐档位 ' + stepLabel(chosen.step) + '，连续合格 ' +
+        chosen.run_length + ' 档，最弱框余量 +' + fixed(chosen.weakest_margin_pct, 1) + '%。');
+    } else {
+      notice('没有能用的起始档，请查看失败的缺拍档或检查框。', true);
+    }
+    renderStartPanel();
+  } finally {
+    state.startBusy = false;
+    renderStartPanel();
+  }
+});
+$('adoptStart').onclick = safe(async () => {
+  if (!state.startReport?.ok) throw Error('请先计算出能用的起始档。');
+  const response = await mutate('/adopt', 'PATCH', {boxes: [...state.startBoxes]},
+    '已采用推荐起始档，后续批扫可拨回该档。');
+  state.startReport = response.evaluation;
+  state.startReport._project = state.project.id;
+  renderStartPanel();
+  const shot = shotAt(state.project.selected);
+  if (shot) changeShot(shot.id);
+});
+$('sealStart').onclick = safe(async () => {
+  const proof = await request(projectPath() + '/proofs', 'POST', {revision: state.project.revision});
   await refreshProofs();
   await openProof(proof.id);
   notice('复核单已封存。');
 });
+$('dialog').onclick = event => {
+  const tab = event.target.closest('[data-proof-box]');
+  if (!tab) return;
+  const dialog = $('dialog');
+  dialog.querySelectorAll('.proof-tab').forEach(item =>
+    item.classList.toggle('current', item === tab));
+  dialog.querySelectorAll('.proof-pane').forEach(item =>
+    item.hidden = item.dataset.proofPane !== tab.dataset.proofBox);
+};
 $('compare').onclick = () => {
   const current = shotAt(state.shot);
   const adopted = shotAt(state.project.selected);

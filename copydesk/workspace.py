@@ -12,7 +12,7 @@ from werkzeug.exceptions import NotFound
 
 from image_lab.validation import Conflict, Invalid, integer, text, timestamp
 
-from . import coordinates, demo, photos, reporting
+from . import coordinates, demo, photos, reporting, start_step
 
 
 ID_PATTERN = re.compile("[a-f0-9]{16}")
@@ -190,11 +190,30 @@ class Workspace:
             record["scale"] = coordinates.ruler(value, record["size"]) if value is not None else None
             return self.commit(self.folder(project), record)
 
-    def adopt(self, project, revision, capture_id):
+    def adopt(self, project, revision, value):
+        """Adopt the recommended starting step for the checked boxes.
+
+        The evaluation is recomputed on the stored originals so a stale or
+        tampered client result can never adopt a step that no longer passes.
+        """
         with self.lock:
             record = self.current(project, revision)
-            record["selected"] = capture_at(record, capture_id)["id"]
-            return self.commit(self.folder(project), record)
+            regions = start_step.checked_regions(record, value.get("boxes"))
+            folder = self.folder(project)
+            evaluation = start_step.evaluate(
+                record["captures"], regions,
+                lambda capture_id: self.capture_path(project, capture_id, record=record))
+            if not evaluation["ok"]:
+                raise Invalid("没有能用的起始档，请先按校准结果补齐缺拍或更换检查框。")
+            chosen = evaluation["recommendation"]
+            capture = capture_at(record, chosen["capture"])
+            record["selected"] = capture["id"]
+            record["focus_start"] = {
+                "capture": capture["id"], "step": chosen["step"],
+                "box_ids": [region["id"] for region in regions],
+                "evaluation": evaluation}
+            self.commit(folder, record)
+            return record, evaluation
 
     def proof_list(self, project):
         self.record(project)
@@ -205,19 +224,31 @@ class Workspace:
         folder = self.folder(project) / "proofs" / key(identifier)
         return folder, read(folder / "review.json")
 
-    def seal(self, project, revision, region_id):
+    def seal(self, project, revision):
+        """Seal the adopted starting step with every box used for the call."""
         with self.lock:
             record = self.current(project, revision)
-            if record["selected"] is None:
-                raise Invalid("请先采用一档原照。")
+            focus_start = record.get("focus_start")
+            if not focus_start or record["selected"] != focus_start.get("capture"):
+                raise Invalid("请先完成起始档校准并采用推荐档。")
+            snapshot = {item["box"]: item for item in focus_start["evaluation"]["box_results"]}
+            regions = []
+            for box_id in focus_start["box_ids"]:
+                try:
+                    current = region_at(record, box_id)
+                except NotFound:
+                    raise Invalid("采用时使用的检查框已被移除，请用现有检查框重新校准起始档后再封存。") from None
+                evidence = snapshot.get(box_id)
+                if evidence is None or current["bounds"] != evidence["bounds"]:
+                    raise Invalid("采用时使用的检查框已被重画，请重新校准起始档后再封存。")
+                regions.append(current)
             capture = capture_at(record, record["selected"])
-            region = region_at(record, region_id)
             identifier = uuid4().hex[:16]
             parent = self.folder(project) / "proofs"
             staging = parent / ("." + identifier)
             staging.mkdir()
             try:
-                proof = reporting.seal(staging, identifier, record, capture, region,
+                proof = reporting.seal(staging, identifier, record, capture, regions, focus_start,
                                        self.capture_path(project, capture["id"], record=record))
                 staging.rename(parent / identifier)
                 return proof

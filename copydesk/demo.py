@@ -41,5 +41,5 @@ def card():
 def sequence():
     master = card()
     for step in range(-4, 5):
-        blur = 0.2 + 0.38 * abs(step)
+        blur = 0.15 + 0.09 * abs(step) + 0.03 * step * step
         yield step, master.filter(ImageFilter.GaussianBlur(blur))

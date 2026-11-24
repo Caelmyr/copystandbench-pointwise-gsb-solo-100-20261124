@@ -52,7 +52,6 @@
         </div>
         <div class="viewer-foot">
           <span id="viewerHint">选择检查框查看原片细节。</span>
-          <button id="adopt" class="accent" type="button" disabled>采用当前原照</button>
         </div>
         <div class="strip-wrap">
           <div class="strip-head"><b>对焦档位阶梯</b><a id="contactDownload" download>下载联系表</a></div>
@@ -106,7 +105,6 @@
         <div class="row wrap">
           <a id="detailDownload" class="button" download hidden>裁片 PNG</a>
           <button id="compare" type="button" disabled>与采用档对看</button>
-          <button id="seal" class="accent" type="button" disabled>封存复核单</button>
         </div>
       </section>
       <section class="panel card reading">
@@ -114,8 +112,22 @@
         <div id="curves" class="curve">选择检查框后可点档位回看原照。</div>
       </section>
     </div>
+    <section class="panel card start-panel">
+      <div class="section-head">
+        <h2>起始档校准</h2>
+        <span>各框只与本组原照中自己的最高有效清晰度比较 · 过线 85% · 灰阶跨度 ≥ 8 才算有效证据</span>
+      </div>
+      <div id="startBoxes" class="start-boxes"></div>
+      <div class="row wrap">
+        <button id="evaluateStart" class="accent" type="button" disabled>计算起始档</button>
+        <button id="adoptStart" type="button" disabled>采用推荐起始档</button>
+        <button id="sealStart" class="accent" type="button" disabled>封存复核单</button>
+        <span id="startHint" class="start-hint">至少勾选两个已有检查框。</span>
+      </div>
+      <div id="startResult" class="start-result" hidden></div>
+    </section>
     <section class="panel card archive">
-      <div class="section-head"><h2>复核单</h2></div>
+      <div class="section-head"><h2>复核单</h2><span>封存采用档与本次用到的全部检查框证据</span></div>
       <div id="proofs" class="proof-list">暂无复核单。</div>
     </section>
   </div>
