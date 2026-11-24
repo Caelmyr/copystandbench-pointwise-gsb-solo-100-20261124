@@ -12,7 +12,7 @@ from werkzeug.exceptions import NotFound
 
 from image_lab.validation import Conflict, Invalid, integer, text, timestamp
 
-from . import coordinates, demo, photos, reporting
+from . import coordinates, demo, lighting, photos, reporting
 
 
 ID_PATTERN = re.compile("[a-f0-9]{16}")
@@ -199,11 +199,14 @@ class Workspace:
     def proof_list(self, project):
         self.record(project)
         proofs = (read(path) for path in (self.folder(project) / "proofs").glob("[0-9a-f]*/review.json"))
-        return sorted(proofs, key=lambda item: item["created"], reverse=True)
+        return sorted((dict(proof, kind=proof.get("kind", "capture")) for proof in proofs),
+                      key=lambda item: item["created"], reverse=True)
 
     def proof(self, project, identifier):
         folder = self.folder(project) / "proofs" / key(identifier)
-        return folder, read(folder / "review.json")
+        record = read(folder / "review.json")
+        record.setdefault("kind", "capture")
+        return folder, record
 
     def seal(self, project, revision, region_id):
         with self.lock:
@@ -220,6 +223,39 @@ class Workspace:
                 proof = reporting.seal(staging, identifier, record, capture, region,
                                        self.capture_path(project, capture["id"], record=record))
                 staging.rename(parent / identifier)
+                return proof
+            finally:
+                if staging.exists():
+                    rmtree(staging)
+
+    def seal_lighting(self, project, revision, first_id, second_id, region_id):
+        with self.lock:
+            record = self.current(project, revision)
+            first = capture_at(record, first_id)
+            second = capture_at(record, second_id)
+            if first["id"] == second["id"]:
+                raise Invalid("布光检查需要两张不同的换位原照。")
+            region = region_at(record, region_id)
+            result = lighting.analyze(
+                [first, second], region,
+                lambda capture: self.capture_path(project, capture, record=record))
+            assets = lighting.crop_assets(
+                result, lambda capture: self.capture_path(project, capture, record=record))
+            identifier = uuid4().hex[:16]
+            parent = self.folder(project) / "proofs"
+            staging = parent / ("." + identifier)
+            staging.mkdir()
+            try:
+                for name, data in assets.items():
+                    (staging / name).write_bytes(data)
+                proof = {"id": identifier, "kind": "lighting", "created": timestamp(),
+                         "project": record["id"], "title": record["title"],
+                         "synthetic": record["synthetic"], "project_revision": record["revision"],
+                         "lighting": result,
+                         "crops_sha256": {name: sha256(data).hexdigest() for name, data in assets.items()}}
+                put_json(staging / "review.json", proof)
+                staging.rename(parent / identifier)
+                self.commit(self.folder(project), record)
                 return proof
             finally:
                 if staging.exists():

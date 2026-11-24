@@ -2,7 +2,7 @@
 
 const $ = id => document.getElementById(id);
 const state = {project: null, shot: null, region: null, tool: null, drag: null, points: [], clipping: false,
-  refresh: 0, reading: 0, saving: false};
+  refresh: 0, reading: 0, saving: false, lighting: null};
 const escapeHtml = value => String(value).replace(/[&<>"']/g, ch => (
   {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
 const stepLabel = step => step > 0 ? '+' + step : String(step);
@@ -172,7 +172,41 @@ function render() {
   updatePrepareLink();
   paint();
   void refreshReadings();
+  renderLightingDesk();
 }
+
+function renderLightingDesk() {
+  const project = state.project;
+  const box = boxAt(state.region);
+  const shots = project ? project.captures : [];
+  const keep = value => shots.some(item => item.id === value) ? value : '';
+  for (const [selectId, fallback] of [['lightShotA', shots[0]?.id], ['lightShotB', shots[1]?.id]]) {
+    const select = $(selectId);
+    const touched = Object.prototype.hasOwnProperty.call(select.dataset, 'touched');
+    const chosen = keep(select.dataset.value) || (!touched && !state.lighting ? fallback || '' : '');
+    select.replaceChildren(new Option('选择原照', ''));
+    for (const item of shots) {
+      select.add(new Option('档位 ' + stepLabel(item.step) + ' · ' + item.name, item.id));
+    }
+    select.value = chosen || '';
+    select.dataset.value = select.value;
+  }
+  $('lightBoxHint').textContent = box
+    ? '检查框「' + box.name + '」按 2 列 × 3 行切成左右六格，同一水平带的左右两格配成三对。'
+    : '使用当前所选检查框，按 2 列 × 3 行切成左右六格，同一水平带左右配成三对。';
+  const ready = shots.length >= 2 && Boolean(box) &&
+    $('lightShotA').value && $('lightShotB').value && $('lightShotA').value !== $('lightShotB').value;
+  $('lightCheck').disabled = !ready;
+  $('lightSeal').disabled = !ready || !state.lighting;
+}
+
+$('lightShotA').onchange = $('lightShotB').onchange = event => {
+  event.target.dataset.touched = '1';
+  event.target.dataset.value = event.target.value;
+  state.lighting = null;
+  $('lightingResult').textContent = '选择两张换位原照后开始检查。';
+  renderLightingDesk();
+};
 
 function updatePrepareLink() {
   if (!state.project) return;
@@ -283,9 +317,14 @@ async function refreshProofs() {
   const project = state.project.id;
   const proofs = await request(projectPath() + '/proofs');
   if (state.project?.id !== project || proofs.length === 0) return;
-  $('proofs').innerHTML = proofs.map(item =>
-    '<button type="button" data-proof="' + item.id + '">打开档位 ' + stepLabel(item.capture.step) +
-    ' · ' + escapeHtml(item.region.name) + '</button>').join('');
+  $('proofs').innerHTML = proofs.map(item => {
+    if (item.kind === 'lighting') {
+      return '<button type="button" data-proof="' + item.id + '" data-kind="lighting">布光检查 · ' +
+        escapeHtml(item.lighting.region.name) + '</button>';
+    }
+    return '<button type="button" data-proof="' + item.id + '">打开档位 ' + stepLabel(item.capture.step) +
+      ' · ' + escapeHtml(item.region.name) + '</button>';
+  }).join('');
 }
 
 function openDialog(title, content) {
@@ -419,7 +458,138 @@ $('closeDialog').onclick = () => $('dialog').close();
 $('captures').onclick = event => { const hit = event.target.closest('[data-shot]'); if (hit) changeShot(hit.dataset.shot); };
 $('boxes').onclick = event => { const hit = event.target.closest('[data-box]'); if (hit) changeRegion(hit.dataset.box); };
 $('curves').onclick = event => { const hit = event.target.closest('[data-curve-shot]'); if (hit) changeShot(hit.dataset.curveShot); };
-$('proofs').onclick = safe(event => { const hit = event.target.closest('[data-proof]'); if (hit) return openProof(hit.dataset.proof); });
+$('proofs').onclick = safe(async event => {
+  const hit = event.target.closest('[data-proof]');
+  if (!hit) return;
+  if (hit.dataset.kind === 'lighting') return openLightingProof(hit.dataset.proof);
+  return openProof(hit.dataset.proof);
+});
+
+const sideLabel = side => side === 'left' ? '左侧' : side === 'right' ? '右侧' : '—';
+
+function lightObservationCell(cell, shotLabel, side) {
+  return '<figure class="light-crop">' +
+    (cell.crop ? '<img src="' + cell.crop + '" alt="' + shotLabel + side + '格原像素裁片">' : '') +
+    '<figcaption>' + shotLabel + side + '格 · 线性亮度 ' + fixed(cell.mean_linear, 4) +
+    '<br>近黑 ' + fixed(cell.near_black_pct, 1) + '% · 近白 ' + fixed(cell.near_white_pct, 1) + '%</figcaption></figure>';
+}
+
+function lightingPairMarkup(pair) {
+  const rows = pair.shots.map(shot => {
+    const label = shot.shot === 'a' ? '照片A（换位前）' : '照片B（转180°）';
+    return '<div class="light-obs">' +
+      lightObservationCell(shot.left, label, '左') +
+      '<span class="light-swap">同一块卡面<br>换位对照</span>' +
+      lightObservationCell(shot.right, label, '右') + '</div>';
+  }).join('');
+  let status, detail;
+  if (!pair.usable) {
+    status = '<span class="light-badge excluded">不参与</span>';
+    detail = escapeHtml(pair.excluded_reason || '证据不足。');
+  } else {
+    const dim = pair.is_dim
+      ? '<strong class="light-dim">' + sideLabel(pair.dim_side) + '偏暗 ' + fixed(pair.dim_pct, 1) + '%</strong>'
+      : '<span class="light-even">两侧均衡（差 ' + fixed(pair.dim_pct, 1) + '%，不足 5%）</span>';
+    status = pair.is_dim ? '<span class="light-badge dim">偏暗</span>' : '<span class="light-badge even">均衡</span>';
+    detail = '左/右布光比 ' + fixed(pair.lighting_ratio, 3) +
+      '（两观测 ' + fixed(pair.ratio_a, 3) + '、' + fixed(pair.ratio_b, 3) +
+      '，相差 ' + fixed(pair.ratio_drift_pct, 1) + '%） · 较亮一侧：' + sideLabel(pair.bright_side) + ' · ' + dim;
+  }
+  return '<div class="light-pair">' +
+    '<button type="button" class="light-pair-head" data-pair="' + pair.id + '" aria-expanded="false">' +
+    '<span class="light-pair-name">' + escapeHtml(pair.name) + '</span>' + status +
+    '<span class="light-pair-detail">' + detail + '</span><span class="light-open">点开看两张图同片卡面裁片 ▾</span></button>' +
+    '<div class="light-pair-body" hidden>' + rows + '</div></div>';
+}
+
+function renderLighting(result) {
+  const summary = result.summary;
+  const head = '<div class="light-summary ' + (summary.enough ? 'ok' : 'warn') + '">' +
+    '<b>可用配对 ' + summary.usable_count + ' / ' + summary.total_pairs + '</b>' +
+    (summary.missing.length ? '<span>不参与：' + escapeHtml(summary.missing.join('、')) + '</span>' : '') +
+    '</div>';
+  const note = summary.enough
+    ? '<p class="light-recommend">' + escapeHtml(summary.recommendation.message) + '</p>'
+    : '<p class="light-recommend warn">' + escapeHtml(summary.reshoot) + '</p>';
+  $('lightingResult').innerHTML = head + result.pairs.map(lightingPairMarkup).join('') + note;
+}
+
+$('lightingResult').onclick = event => {
+  const hit = event.target.closest('[data-pair]');
+  if (!hit) return;
+  const body = hit.parentElement.querySelector('.light-pair-body');
+  const open = body.hidden;
+  body.hidden = !open;
+  hit.setAttribute('aria-expanded', String(open));
+};
+
+$('lightCheck').onclick = safe(async () => {
+  if (!state.region) throw Error('请先选择一个检查框。');
+  state.lighting = null;
+  $('lightingResult').textContent = '正在读取两张原照的原像素…';
+  const result = await request(projectPath() + '/lighting/check', 'POST', {
+    first: $('lightShotA').value, second: $('lightShotB').value, box: state.region});
+  state.lighting = result;
+  renderLighting(result);
+  $('lightSeal').disabled = false;
+});
+
+$('lightSeal').onclick = safe(async () => {
+  if (!state.lighting) throw Error('请先完成一次布光检查。');
+  const proof = await request(projectPath() + '/lighting/proofs', 'POST', {
+    revision: state.project.revision,
+    first: $('lightShotA').value, second: $('lightShotB').value, box: state.region});
+  state.lighting = null;
+  await openProject(state.project.id);
+  await openLightingProof(proof.id);
+  notice('布光检查已存入复核单。');
+});
+
+function lightProofObservation(base, pair, shot, fileShot) {
+  const sideCell = side => pair.shots.find(item => item.shot === shot)[side];
+  const label = shot === 'a' ? '照片A（换位前）' : '照片B（转180°）';
+  const fig = (side, text) => '<figure class="light-crop"><img src="' + base + '/' +
+    pair.id + '-' + fileShot + '-' + side + '.png" alt="' + text + '"><figcaption>' + text +
+    ' · 线性亮度 ' + fixed(sideCell(side).mean_linear, 4) + '<br>近黑 ' +
+    fixed(sideCell(side).near_black_pct, 1) + '% · 近白 ' +
+    fixed(sideCell(side).near_white_pct, 1) + '%</figcaption></figure>';
+  return '<div class="light-obs">' + fig('left', label + '左格') +
+    '<span class="light-swap">同一块卡面<br>换位对照</span>' + fig('right', label + '右格') + '</div>';
+}
+
+async function openLightingProof(id) {
+  const base = projectPath() + '/proofs/' + id;
+  const proof = await request(base);
+  const result = proof.lighting;
+  const summary = result.summary;
+  const body = ['<div class="light-summary ' + (summary.enough ? 'ok' : 'warn') + '"><b>可用配对 ' +
+    summary.usable_count + ' / ' + summary.total_pairs + '</b>' +
+    (summary.missing.length ? '<span>不参与：' + escapeHtml(summary.missing.join('、')) + '</span>' : '') + '</div>'];
+  for (const pair of result.pairs) {
+    let head;
+    if (!pair.usable) {
+      head = '<span class="light-badge excluded">不参与</span><span class="light-pair-detail">' +
+        escapeHtml(pair.excluded_reason || '证据不足。') + '</span>';
+    } else {
+      const dim = pair.is_dim
+        ? '<strong class="light-dim">' + sideLabel(pair.dim_side) + '偏暗 ' + fixed(pair.dim_pct, 1) + '%</strong>'
+        : '<span class="light-even">两侧均衡（差 ' + fixed(pair.dim_pct, 1) + '%）</span>';
+      head = (pair.is_dim ? '<span class="light-badge dim">偏暗</span>' : '<span class="light-badge even">均衡</span>') +
+        '<span class="light-pair-detail">左/右布光比 ' + fixed(pair.lighting_ratio, 3) +
+        '（两观测相差 ' + fixed(pair.ratio_drift_pct, 1) + '%） · 较亮：' + sideLabel(pair.bright_side) + ' · ' + dim + '</span>';
+    }
+    body.push('<div class="light-pair"><div class="light-pair-head static"><span class="light-pair-name">' +
+      escapeHtml(pair.name) + '</span>' + head + '</div><div class="light-pair-body">' +
+      lightProofObservation(base, pair, 'a', 'a') + lightProofObservation(base, pair, 'b', 'b') +
+      '</div></div>');
+  }
+  body.push('<p class="light-recommend' + (summary.enough ? '' : ' warn') + '">' +
+    escapeHtml(summary.enough ? summary.recommendation.message : summary.reshoot) + '</p>');
+  body.push('<p class="light-hint">检查框「' + escapeHtml(result.region.name) + '」坐标 ' +
+    result.region.bounds.join(', ') + ' · 原照 ' +
+    result.captures.map(c => '档位' + stepLabel(c.step)).join(' / ') + '</p>');
+  openDialog('布光复核单 · ' + proof.title, body.join(''));
+}
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && state.tool) {
     startTool(null, '已取消当前标记。');

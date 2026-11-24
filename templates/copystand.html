@@ -114,6 +114,25 @@
         <div id="curves" class="curve">选择检查框后可点档位回看原照。</div>
       </section>
     </div>
+    <section class="panel card archive lighting-desk">
+      <div class="section-head">
+        <h2>左右灯布光检查</h2><span>同一灰卡转 180° 的两张原照</span>
+      </div>
+      <div class="input-stack">
+        <div class="row wrap lighting-pick">
+          <label for="lightShotA">换位前原照</label>
+          <select id="lightShotA"></select>
+          <label for="lightShotB">转 180° 后原照</label>
+          <select id="lightShotB"></select>
+        </div>
+        <p id="lightBoxHint" class="light-hint">使用当前所选检查框，按 2 列 × 3 行切成左右六格，同一水平带的左右两格配成三对。</p>
+        <div class="row wrap">
+          <button id="lightCheck" class="accent" type="button" disabled>检查左右亮度差</button>
+          <button id="lightSeal" type="button" disabled>存入复核单</button>
+        </div>
+      </div>
+      <div id="lightingResult" class="lighting-result">选择两张换位原照后开始检查。</div>
+    </section>
     <section class="panel card archive">
       <div class="section-head"><h2>复核单</h2></div>
       <div id="proofs" class="proof-list">暂无复核单。</div>

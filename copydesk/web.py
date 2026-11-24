@@ -2,14 +2,15 @@
 
 from io import BytesIO
 from pathlib import Path
+import re
 
 from flask import Blueprint, jsonify, render_template, request, send_file
 
 from image_lab import create_app as create_preparation
 from image_lab.validation import Invalid, object_value
 
-from . import analysis, photos
-from .workspace import Workspace, region_at
+from . import analysis, lighting, photos
+from .workspace import Workspace, capture_at, region_at
 
 
 def body():
@@ -149,6 +150,27 @@ def create_app(root):
         value = body()
         return jsonify(library.seal(project, value.get("revision"), value.get("box"))), 201
 
+    @desk.post("/projects/<project>/lighting/check")
+    def lighting_check(project):
+        value = body()
+        record = library.record(project)
+        first = capture_at(record, value.get("first"))
+        second = capture_at(record, value.get("second"))
+        region = region_at(record, value.get("box"))
+        result = lighting.analyze(
+            [first, second], region,
+            lambda capture: library.capture_path(project, capture, record=record))
+        lighting.attach_inline_crops(
+            result, lambda capture: library.capture_path(project, capture, record=record))
+        return jsonify(result)
+
+    @desk.post("/projects/<project>/lighting/proofs")
+    def lighting_seal(project):
+        value = body()
+        proof = library.seal_lighting(project, value.get("revision"), value.get("first"),
+                                      value.get("second"), value.get("box"))
+        return jsonify(proof), 201
+
     @desk.get("/projects/<project>/proofs/<proof>")
     def proof_record(project, proof):
         return jsonify(library.proof(project, proof)[1])
@@ -156,9 +178,13 @@ def create_app(root):
     @desk.get("/projects/<project>/proofs/<proof>/<file>")
     def proof_file(project, proof, file):
         folder, _ = library.proof(project, proof)
-        if file not in ("review.json", "review.zip", "source.png", "detail.png"):
+        allowed = {"review.json", "review.zip", "source.png", "detail.png"}
+        if file not in allowed and re.fullmatch(r"p[123]-[ab]-(left|right)\.png", file) is None:
             raise Invalid("这不是复核单的附件。")
-        return send_file(folder / file, download_name=file,
+        path = folder / file
+        if not path.is_file():
+            raise Invalid("这不是复核单的附件。")
+        return send_file(path, download_name=file,
                          as_attachment=file == "review.zip" or "download" in request.args)
 
     app.register_blueprint(desk)
