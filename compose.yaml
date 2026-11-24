@@ -1,0 +1,23 @@
+name: solo103-copydesk
+services:
+  desk:
+    build:
+      context: .
+      args:
+        COPYDESK_RUNTIME_IMAGE: ${COPYDESK_RUNTIME_IMAGE:-python:3.12-slim}
+    image: ${COPYDESK_IMAGE:-solo103-copydesk:1.0}
+    network_mode: bridge
+    environment:
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    ports:
+      - "127.0.0.1:${COPYDESK_PORT:-19903}:8000"
+    volumes:
+      - copy-data:/var/lib/copydesk
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/copydesk/health', timeout=3).status == 200"]
+      interval: 3s
+      timeout: 4s
+      retries: 12
+volumes:
+  copy-data:

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CopyStand Bench · 俯拍校准台</title>
+  <link rel="stylesheet" href="/static/copystand.css">
+</head>
+<body>
+<header class="mast">
+  <div class="mast-content">
+    <a class="brand" href="/"><span class="mark" aria-hidden="true"></span> CopyStand <span>Bench</span></a>
+    <span class="desk-label">俯拍校准台</span>
+    <a class="prep-top" href="/prepare">照片准备 ↗</a>
+  </div>
+</header>
+<main>
+  <section class="intro">
+    <div>
+      <h1>开拍前，先校准。</h1>
+      <p>检查俯拍台的焦档、台面光线与复制比例，把确认位置留在复核单。</p>
+    </div>
+    <form id="newProject" class="project-create">
+      <input id="projectTitle" aria-label="新台位名称" placeholder="新台位名称" maxlength="84" required>
+      <button>新建台位</button>
+    </form>
+    <button id="startDemo" class="accent" type="button">打开合成校准片</button>
+  </section>
+  <nav id="projectBar" class="project-bar" aria-label="校准台位">
+    <label for="projects">台位</label><select id="projects"><option value="">选择已有台位</option></select>
+    <span id="projectCounts"></span>
+    <span id="projectTag" class="project-tag" hidden>合成来源</span>
+  </nav>
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+  <section id="emptyProject" class="empty-project">
+    <span class="empty-icon" aria-hidden="true"></span>
+    <h2>等待校准原照</h2><p>打开合成卡，或新建台位导入照片。</p>
+  </section>
+  <div id="desk" hidden>
+    <div class="work">
+      <section class="viewer panel">
+        <div class="panel-head viewer-head">
+          <div><h2>原照工作区</h2><p id="captureInfo">从一张原照开始</p></div>
+          <div class="row"><button id="clipToggle" type="button" disabled>欠曝／过曝</button><a id="rawDownload" class="button" download hidden>原照 PNG</a></div>
+        </div>
+        <div class="stage">
+          <p id="noCapture">在右侧输入档位并选择原照。</p>
+          <div id="frameView" class="frame-view" hidden>
+            <img id="frameImage" alt="选中的俯拍校准原照">
+            <canvas id="frameCanvas" aria-label="原照上的检查框与标尺"></canvas>
+          </div>
+        </div>
+        <div class="viewer-foot">
+          <span id="viewerHint">选择检查框查看原片细节。</span>
+          <button id="adopt" class="accent" type="button" disabled>采用当前原照</button>
+        </div>
+        <div class="strip-wrap">
+          <div class="strip-head"><b>对焦档位阶梯</b><a id="contactDownload" download>下载联系表</a></div>
+          <div id="captures" class="strip"></div>
+        </div>
+      </section>
+      <aside class="right">
+        <section class="panel card">
+          <h2>添加原照</h2>
+          <form id="upload" class="input-stack">
+            <div class="row">
+              <label for="shotStep">档位</label>
+              <input id="shotStep" aria-label="档位" type="number" required step="1" min="-99" max="99" value="0">
+              <a id="prepareLink" href="/prepare">从照片准备送入 ↗</a>
+            </div>
+            <input id="shotFile" aria-label="原照文件" type="file" accept="image/png,image/jpeg,image/tiff,.tif,.tiff" required>
+            <button type="submit">导入此档</button>
+          </form>
+        </section>
+        <section class="panel card">
+          <div class="section-head"><h2>检查框</h2><span id="selectedBounds"></span></div>
+          <div id="boxes" class="box-list"></div>
+          <div class="row wrap">
+            <input id="boxName" aria-label="检查框名称" placeholder="检查框名称" maxlength="48">
+            <button id="newBox" type="button" disabled>画新框</button>
+          </div>
+          <div class="row wrap">
+            <button id="replaceBox" type="button" disabled>重画所选</button>
+            <button id="removeBox" type="button" disabled>移除所选</button>
+          </div>
+        </section>
+        <section class="panel card">
+          <div class="section-head"><h2>复制比例</h2><span id="scaleText"></span></div>
+          <div class="row wrap">
+            <input id="scaleLength" aria-label="标尺实际长度（毫米）" type="number" min="0.01" max="5000" step="any" value="150">
+            <span>mm</span>
+            <button id="setScale" type="button" disabled>点标尺两端</button>
+            <button id="resetScale" type="button" disabled>清除</button>
+          </div>
+        </section>
+        <section class="panel card">
+          <div class="section-head"><h2>整照亮度</h2><span id="exposureStats"></span></div>
+          <div id="histogram" class="histogram" role="img" aria-label="整照亮度分布"></div>
+        </section>
+      </aside>
+    </div>
+    <div class="lower">
+      <section class="panel card reading">
+        <div class="section-head"><h2>局部检查</h2><span id="readingName"></span></div>
+        <div id="reading" class="local-reading">选一张原照与一个检查框。</div>
+        <div class="row wrap">
+          <a id="detailDownload" class="button" download hidden>裁片 PNG</a>
+          <button id="compare" type="button" disabled>与采用档对看</button>
+          <button id="seal" class="accent" type="button" disabled>封存复核单</button>
+        </div>
+      </section>
+      <section class="panel card reading">
+        <div class="section-head"><h2>所选框 · 逐档清晰度</h2><span>越高越锐</span></div>
+        <div id="curves" class="curve">选择检查框后可点档位回看原照。</div>
+      </section>
+    </div>
+    <section class="panel card archive">
+      <div class="section-head"><h2>复核单</h2></div>
+      <div id="proofs" class="proof-list">暂无复核单。</div>
+    </section>
+  </div>
+</main>
+<dialog id="dialog">
+  <div class="dialog-head"><h2 id="dialogTitle"></h2><button id="closeDialog" type="button" aria-label="关闭">关闭</button></div>
+  <div id="dialogBody"></div>
+</dialog>
+<script src="/static/copystand.js" defer></script>
+</body>
+</html>
